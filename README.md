@@ -1,73 +1,82 @@
 # Prueba_Base_de_Datos
 
 import xlsx from 'xlsx';
+import fs from 'fs';
 import Product from '../models/Product.js';
 import Supplier from '../models/Supplier.js';
 import ProductDetail from '../models/ProductDetail.js';
 
-// Ahora recibimos 'filePath' (la ruta absoluta) en vez de 'fileBuffer'
 export const processCoffeeExcel = async (filePath) => {
-    
-    // 1. LEER DESDE EL DISCO (Corregido)
-    const workbook = xlsx.readFile(filePath); 
-    const sheetName = workbook.SheetNames[0];
-    const data = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
-
-    console.log(`📊 Se encontraron ${data.length} filas en el Excel.`);
-    let count = 0;
-
-    for (const row of data) {
-        try {
-            // Si la fila está vacía o no tiene producto, la saltamos
-            if (!row.PRODUCTO) continue; 
-
-            // 2. EXTRAER DATOS DEL PROVEEDOR (De la columna PROVEEDOR_INFO)
-            // Ejemplo de tu Excel: "Finca La Esperanza - Huila - NIT 900123"
-            let sName = "Desconocido", sCity = "N/A", sNit = "000";
-
-            if (row.PROVEEDOR_INFO && typeof row.PROVEEDOR_INFO === 'string') {
-                const parts = row.PROVEEDOR_INFO.split('-');
-                sName = parts[0] ? parts[0].trim() : "Desconocido";
-                sCity = parts[1] ? parts[1].trim() : "N/A";
-                // Limpiamos la palabra "NIT" para dejar solo el número
-                sNit = parts[2] ? parts[2].replace(/NIT/i, '').trim() : "S/N";
-            }
-
-            // A. SQL: Guardar Proveedor (Usamos las variables extraídas)
-            await Supplier.findOrCreate({
-                where: { supplier_nit: sNit },
-                defaults: { supplier_name: sName, supplier_city: sCity }
-            });
-
-            // B. SQL: Guardar Producto (Conectamos tu Excel con el Modelo)
-            await Product.findOrCreate({
-                where: { product_name: row.PRODUCTO }, // Viene de tu columna PRODUCTO
-                defaults: {
-                    unit_price: row.PRECIO || 0,       // Viene de tu columna PRECIO
-                    quantity_stock: row.STOCK || 0,    // Viene de tu columna STOCK
-                    product_category: 'Grano/Preparado'
-                }
-            });
-
-            // C. NoSQL: Inicializar Detalles de Cata en MongoDB
-            await ProductDetail.findOneAndUpdate(
-                { product_name: row.PRODUCTO }, // Viene de tu columna PRODUCTO
-                { 
-                    $setOnInsert: { 
-                        tasting_notes: ["Origen único", "Cosecha manual"],
-                        roast_level: "Medio" 
-                    } 
-                },
-                { upsert: true }
-            );
-
-            count++;
-            console.log(`✅ ${row.PRODUCTO} guardado correctamente.`);
-
-        } catch (error) {
-            console.error(`❌ Error en fila ${row.PRODUCTO}:`, error.message);
+    try {
+        // 1. VERIFICAR SI EL ARCHIVO EXISTE EN UPLOADS
+        if (!fs.existsSync(filePath)) {
+            throw new Error(`El archivo no se encuentra en la ruta: ${filePath}`);
         }
+
+        // 2. LEER DESDE DISCO (Usando readFile)
+        const workbook = xlsx.readFile(filePath); 
+        const sheetName = workbook.SheetNames[0];
+        const data = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+
+        console.log(`📊 Filas detectadas en el Excel: ${data.length}`);
+
+        let count = 0;
+
+        for (const row of data) {
+            try {
+                // Validación: Si la fila no tiene nombre de producto, la saltamos
+                if (!row.PRODUCTO) continue;
+
+                // --- PROCESAR PROVEEDOR_INFO ---
+                let sName = "Interno", sCity = "N/A", sNit = "000";
+                if (row.PROVEEDOR_INFO && row.PROVEEDOR_INFO !== "Interno (Preparado)") {
+                    const parts = String(row.PROVEEDOR_INFO).split('-');
+                    sName = parts[0]?.trim() || "Desconocido";
+                    sCity = parts[1]?.trim() || "N/A";
+                    sNit = parts[2] ? parts[2].replace(/NIT/i, '').trim() : "S/N";
+                }
+
+                // A. SQL: Guardar Proveedor
+                await Supplier.findOrCreate({
+                    where: { supplier_nit: String(sNit) },
+                    defaults: { supplier_name: sName, supplier_city: sCity }
+                });
+
+                // B. SQL: Guardar Producto (Usando los nombres exactos de tu imagen)
+                await Product.findOrCreate({
+                    where: { product_name: String(row.PRODUCTO).trim() },
+                    defaults: {
+                        unit_price: parseFloat(row.PRECIO) || 0,
+                        quantity_stock: parseInt(row.STOCK) || 0,
+                        product_category: 'Café de Origen'
+                    }
+                });
+
+                // C. NoSQL: MongoDB (Detalles de Cata)
+                await ProductDetail.findOneAndUpdate(
+                    { product_name: String(row.PRODUCTO).trim() },
+                    { 
+                        $setOnInsert: { 
+                            tasting_notes: ["Origen único", "Cosecha manual"],
+                            roast_level: "Medio",
+                            last_update: new Date()
+                        } 
+                    },
+                    { upsert: true }
+                );
+
+                count++;
+                console.log(`✅ Procesado con éxito: ${row.PRODUCTO}`);
+
+            } catch (rowError) {
+                console.error(`❌ Error en fila ${row.PRODUCTO}:`, rowError.message);
+            }
+        }
+
+        return { success: true, count };
+
+    } catch (error) {
+        console.error("❌ Error fatal en el servicio:", error.message);
+        throw error;
     }
-    
-    return { success: true, count: count, message: "Importación de datos de Café finalizada" };
 };
